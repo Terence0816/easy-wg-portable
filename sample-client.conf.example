@@ -1,0 +1,13 @@
+# 範例而已，請換成你自己的 MikroTik / WireGuard 設定。
+# 請勿把真正 PrivateKey 上傳到 GitHub。
+
+[Interface]
+PrivateKey = REPLACE_WITH_CLIENT_PRIVATE_KEY
+Address = 10.1.1.66/32
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = REPLACE_WITH_SERVER_PUBLIC_KEY
+AllowedIPs = 0.0.0.0/0
+Endpoint = your-domain.example:13277
+PersistentKeepalive = 25

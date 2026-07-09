@@ -1,0 +1,39 @@
+#include <windows.h>
+#include "resource.h"
+#include "version.rcinc"
+
+IDI_APP_ICON ICON "..\\res\\EasyWG.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION EASYWG_FILE_VERSION
+ PRODUCTVERSION EASYWG_PRODUCT_VERSION
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS 0x1L
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Terence0816\0"
+            VALUE "FileDescription", "EasyWG Portable - WireGuard Quick Connect\0"
+            VALUE "FileVersion", EASYWG_FILE_VERSION_STR
+            VALUE "InternalName", "EasyWG\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Terence0816\0"
+            VALUE "OriginalFilename", "EasyWG.exe\0"
+            VALUE "ProductName", "EasyWG Portable\0"
+            VALUE "ProductVersion", EASYWG_PRODUCT_VERSION_STR
+            VALUE "Comments", "Lightweight portable WireGuard quick-connect client for Windows\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
