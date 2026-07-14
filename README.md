@@ -2,7 +2,7 @@
 
 Lightweight and portable WireGuard quick-connect client for Windows 7 / 10 / 11.
 
-[![Downloads](https://img.shields.io/github/downloads/Terence0816/easy-wg-portable/total?label=Downloads&color=1f6feb)](https://github.com/Terence0816/easy-wg-portable/releases) | [Releases](https://github.com/Terence0816/easy-wg-portable/releases) | [Latest Official Build `v0.2.8.8`](https://github.com/Terence0816/easy-wg-portable/releases/download/v0.2.8.8/EasyWG.exe) | [MIT License](./LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/Terence0816/easy-wg-portable/total?label=Downloads&color=1f6feb)](https://github.com/Terence0816/easy-wg-portable/releases) | [Releases](https://github.com/Terence0816/easy-wg-portable/releases) | [Latest Official Build `v0.2.8.10`](https://github.com/Terence0816/easy-wg-portable/releases/download/v0.2.8.10/EasyWG.exe) | [MIT License](./LICENSE)
 
 English | [繁體中文](#zh-tw)
 
@@ -15,6 +15,19 @@ It is designed for users who want a simple portable workflow without installing 
 > EasyWG Portable is an independent, unofficial project and is not affiliated with or endorsed by the WireGuard project.
 
 ## Version History
+
+### v0.2.8.10
+
+- Improved the `wireguard.dll` download flow
+  - On Windows 10 / 11, EasyWG still tries to download `wireguard.dll` from the official WireGuard source first.
+  - If the official download fails, EasyWG now automatically falls back to the EasyWG GitHub `core-v1` backup source.
+  - This helps reduce first-launch failures caused by network, firewall, TLS, or official download source connection issues.
+
+- Fixed possible main window flickering while idle
+  - Reduced unnecessary per-second UI repainting.
+  - Status text, connection information, and log content are no longer refreshed when unchanged.
+  - Improved visual stability of the main window when no user action is being performed.
+
 
 ### v0.2.8.8
 
@@ -232,6 +245,18 @@ EasyWG Portable 是一款輕量化、免傳統安裝的 **Windows WireGuard VPN 
 > EasyWG Portable 為獨立、非官方專案，與 WireGuard 官方專案無隸屬或背書關係。
 
 ## 版本更新紀錄
+
+### v0.2.8.8
+
+- 改善 `wireguard.dll` 下載流程
+  - Windows 10 / 11 缺少 `wireguard.dll` 時，仍會優先嘗試從 WireGuard 官方來源取得。
+  - 若官方來源下載失敗，會自動改用 EasyWG GitHub `core-v1` 備援來源下載。
+  - 可降低部分環境因網路、防火牆、TLS 或官方下載站連線問題導致首次啟動失敗的情況。
+
+- 修復主視窗閒置時可能持續閃動的問題
+  - 減少不必要的每秒 UI 重繪。
+  - 狀態文字、連線資訊與紀錄內容未變更時，不再重複刷新。
+  - 改善主視窗在未操作時的穩定顯示效果。
 
 ### v0.2.8.8
 
