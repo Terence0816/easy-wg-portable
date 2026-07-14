@@ -49,6 +49,8 @@ namespace
 constexpr wchar_t kAppName[] = L"EasyWG Portable";
 constexpr wchar_t kTunnelDownloadUrl[] =
     L"https://github.com/Terence0816/easy-wg-portable/releases/download/core-v1/tunnel.dll";
+constexpr wchar_t kWireGuardFallbackDownloadUrl[] =
+    L"https://github.com/Terence0816/easy-wg-portable/releases/download/core-v1/wireguard.dll";
 
 constexpr wchar_t kLegacyTunnelWin7DownloadUrl[] =
     L"https://github.com/Terence0816/easy-wg-portable/releases/download/core-v1/tunnel-win7.dll";
@@ -1862,6 +1864,9 @@ bool DownloadOfficialWireGuardNtComponent(
     const std::wstring& appDir,
     std::wstring& error)
 {
+    const std::wstring wireguardPath =
+        (fs::path(appDir) / L"wireguard.dll").wstring();
+
     std::wstring script;
     if (!WriteEmbeddedScriptToTemp(
             EmbeddedScripts::kBootstrapWireGuardNtScript,
@@ -1904,20 +1909,56 @@ bool DownloadOfficialWireGuardNtComponent(
     DeleteFileW(script.c_str());
     DeleteFileW(resultFile.c_str());
 
-    if (!ran || exitCode != 0 || result.rfind(L"OK|", 0) != 0)
+    if (ran && exitCode == 0 && result.rfind(L"OK|", 0) == 0 &&
+        FileExistsNonEmpty(wireguardPath))
     {
-        error = Tr(
-            L"從 WireGuard 官方取得 wireguard.dll 失敗。",
-            L"Failed to obtain wireguard.dll from the official WireGuard source.");
-
-        if (!result.empty())
-            error += L"\r\n" + result;
-
-        return false;
+        return true;
     }
 
-    return FileExistsNonEmpty(
-        (fs::path(appDir) / L"wireguard.dll").wstring());
+    std::wstring officialError = Tr(
+        L"從 WireGuard 官方取得 wireguard.dll 失敗。",
+        L"Failed to obtain wireguard.dll from the official WireGuard source.");
+
+    if (!result.empty())
+        officialError += L"\r\n" + result;
+    else if (!ran)
+        officialError += std::wstring(L"\r\n") + Tr(
+            L"PowerShell 下載流程未成功執行。",
+            L"The PowerShell download flow did not run successfully.");
+    else if (exitCode != 0)
+    {
+        std::wstringstream ss;
+        ss << L"\r\n"
+           << Tr(L"PowerShell 結束碼：", L"PowerShell exit code: ")
+           << exitCode;
+        officialError += ss.str();
+    }
+
+    SetBootstrapText(
+        bootstrap,
+        Tr(L"官方下載失敗，正在改用 EasyWG GitHub 備援來源…",
+           L"Official download failed, trying the EasyWG GitHub fallback source..."));
+
+    std::wstring fallbackError;
+    if (DownloadUrlToFile(kWireGuardFallbackDownloadUrl, wireguardPath, fallbackError) &&
+        FileExistsNonEmpty(wireguardPath))
+    {
+        return true;
+    }
+
+    error = officialError;
+    error += L"\r\n\r\n";
+    error += Tr(
+        L"已嘗試 EasyWG GitHub 備援來源，但仍無法取得 wireguard.dll。",
+        L"The EasyWG GitHub fallback source was also tried, but wireguard.dll still could not be obtained.");
+    error += L"\r\n";
+    error += Tr(L"備援來源：", L"Fallback source: ");
+    error += kWireGuardFallbackDownloadUrl;
+
+    if (!fallbackError.empty())
+        error += L"\r\n" + fallbackError;
+
+    return false;
 }
 
 
@@ -2372,10 +2413,34 @@ std::wstring BuildConnectionInfoText()
     return ss.str();
 }
 
+bool SetWindowTextIfChanged(HWND control, const std::wstring& text)
+{
+    if (!control)
+        return false;
+
+    const int len = GetWindowTextLengthW(control);
+    std::wstring current;
+    if (len > 0)
+    {
+        current.resize(static_cast<size_t>(len) + 1);
+        const int written = GetWindowTextW(control, current.data(), len + 1);
+        if (written > 0)
+            current.resize(static_cast<size_t>(written));
+        else
+            current.clear();
+    }
+
+    if (current == text)
+        return false;
+
+    SetWindowTextW(control, text.c_str());
+    return true;
+}
+
 void UpdateConnectionInfo()
 {
     if (g_infoEdit)
-        SetWindowTextW(g_infoEdit, BuildConnectionInfoText().c_str());
+        SetWindowTextIfChanged(g_infoEdit, BuildConnectionInfoText());
 }
 
 std::wstring ServiceStateText(DWORD state)
@@ -2403,11 +2468,16 @@ std::wstring ServiceStateText(DWORD state)
 
 void SetStatus(DWORD state)
 {
+    const bool stateChanged = (g_lastServiceState != state);
     g_lastServiceState = state;
+
     if (g_statusLabel)
-        SetWindowTextW(g_statusLabel, ServiceStateText(state).c_str());
-    if (g_mainWindow)
-        InvalidateRect(g_mainWindow, nullptr, FALSE);
+    {
+        SetWindowTextIfChanged(g_statusLabel, ServiceStateText(state));
+
+        if (stateChanged)
+            InvalidateRect(g_statusLabel, nullptr, TRUE);
+    }
 }
 
 void UpdateTrayTooltip()
