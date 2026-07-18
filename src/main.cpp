@@ -6,12 +6,16 @@
 #define WINVER 0x0601
 #endif
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <commdlg.h>
 #include <commctrl.h>
 #include <shellapi.h>
 #include <winsvc.h>
 #include <winhttp.h>
+#include <bcrypt.h>
+#include <wincrypt.h>
 
 #include <algorithm>
 #include <atomic>
@@ -27,11 +31,14 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "resource.h"
 #include "version.h"
 #include "embedded_scripts.h"
+#include "easywg_request_protocol.hpp"
+#include "x25519_fallback.hpp"
 
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -41,6 +48,9 @@
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "version.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "crypt32.lib")
 
 namespace fs = std::filesystem;
 
@@ -62,12 +72,15 @@ constexpr wchar_t kWindowClass[] = L"EasyWGPortableWindow";
 constexpr wchar_t kOptionsClass[] = L"EasyWGPortableOptionsWindow";
 constexpr wchar_t kBootstrapClass[] = L"EasyWGPortableBootstrapWindow";
 constexpr wchar_t kAboutClass[] = L"EasyWGPortableAboutWindow";
+constexpr wchar_t kRequestClass[] = L"EasyWGPortableRequestWindow";
+constexpr wchar_t kTemporaryConfigDisplay[] = L"(臨時連接)";
 constexpr wchar_t kRunValueName[] = L"EasyWG Portable";
 constexpr wchar_t kSingleInstanceName[] = L"Local\\EasyWGPortableMainInstance";
 constexpr UINT_PTR kStatusTimerId = 1;
 constexpr UINT WM_TRAYICON = WM_APP + 1;
 constexpr UINT WM_UPDATE_DONE = WM_APP + 2;
 constexpr UINT WM_AUTO_CONNECT = WM_APP + 3;
+constexpr UINT WM_REQUEST_DONE = WM_APP + 4;
 
 enum ControlId : int
 {
@@ -94,13 +107,25 @@ enum ControlId : int
     IDC_OPT_HINT = 1108,
     IDC_OPT_AUTOCONNECT = 1109,
     IDC_ABOUT_GITHUB = 1201,
-    IDC_ABOUT_CLOSE = 1202
+    IDC_ABOUT_CLOSE = 1202,
+
+    IDC_REQ_SERVER = 1301,
+    IDC_REQ_NAME = 1310,
+    IDC_REQ_PORT = 1302,
+    IDC_REQ_PASSWORD = 1303,
+    IDC_REQ_FULL_TUNNEL = 1304,
+    IDC_REQ_TEMPORARY = 1305,
+    IDC_REQ_SUBMIT = 1306,
+    IDC_REQ_CANCEL = 1307,
+    IDC_REQ_STATUS = 1308,
+    IDC_REQ_DOWNLOAD = 1309
 };
 
 enum MenuId : int
 {
     IDM_OPTIONS = 2001,
-    IDM_ABOUT = 2002,
+    IDM_QUICK_REQUEST = 2002,
+    IDM_ABOUT = 2003,
     IDM_TRAY_SHOW = 2101,
     IDM_TRAY_EXIT = 2102
 };
@@ -118,6 +143,9 @@ struct Settings
     bool autoConnect = false;
     Language language = Language::ZhTW;
     std::wstring lastConfig;
+    std::wstring requestServer;
+    int requestPort = 51820;
+    std::wstring requestName = L"New Device";
 };
 
 struct ConfigInfo
@@ -131,6 +159,7 @@ struct ConfigInfo
 HWND g_mainWindow = nullptr;
 HWND g_optionsWindow = nullptr;
 HWND g_aboutWindow = nullptr;
+HWND g_requestWindow = nullptr;
 HWND g_headerLabel = nullptr;
 HWND g_configLabel = nullptr;
 HWND g_configEdit = nullptr;
@@ -143,6 +172,17 @@ HWND g_infoLabel = nullptr;
 HWND g_infoEdit = nullptr;
 HWND g_logLabel = nullptr;
 HWND g_logEdit = nullptr;
+
+HWND g_reqName = nullptr;
+HWND g_reqServer = nullptr;
+HWND g_reqPort = nullptr;
+HWND g_reqPassword = nullptr;
+HWND g_reqFullTunnel = nullptr;
+HWND g_reqTemporary = nullptr;
+HWND g_reqSubmit = nullptr;
+HWND g_reqCancel = nullptr;
+HWND g_reqStatus = nullptr;
+HWND g_reqDownload = nullptr;
 
 HWND g_optAutostart = nullptr;
 HWND g_optStayTray = nullptr;
@@ -163,11 +203,24 @@ Settings g_settings;
 std::wstring g_initialConfig;
 std::wstring g_activeServiceName;
 std::wstring g_activeConfigPath;
+std::wstring g_temporaryConfigPath;
 std::atomic_bool g_closing{ false };
 std::atomic_bool g_forceExit{ false };
 std::atomic_bool g_updateRunning{ false };
 std::mutex g_updateMutex;
 std::wstring g_updateResult;
+std::atomic_bool g_requestRunning{ false };
+std::mutex g_requestMutex;
+struct QuickRequestCompletion
+{
+    bool ok = false;
+    bool temporary = false;
+    std::wstring error;
+    std::wstring configText;
+    std::wstring suggestedFileName;
+    std::wstring requestHost;
+};
+QuickRequestCompletion g_requestCompletion;
 SYSTEMTIME g_connectedLocalTime{};
 std::chrono::steady_clock::time_point g_connectedAt{};
 bool g_hasConnectedTime = false;
@@ -187,10 +240,21 @@ COLORREF g_statusOfflineColor = RGB(80, 89, 100);
 std::wstring FormatWin32Error(DWORD error);
 std::wstring Trim(const std::wstring& value);
 bool DownloadOfficialWireGuardNtComponent(HWND bootstrap, const std::wstring& appDir, std::wstring& error);
+HFONT CreateUiFont(int pointSize = 9, bool bold = false);
+void ApplyFont(HWND control, HFONT font);
+void ShowMainWindow();
+void ShowQuickRequest();
 
 const wchar_t* Tr(const wchar_t* zh, const wchar_t* en)
 {
     return g_settings.language == Language::ZhTW ? zh : en;
+}
+
+void SecureClearWideString(std::wstring& value)
+{
+    if (!value.empty())
+        SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
+    value.clear();
 }
 
 std::wstring GetModulePath()
@@ -855,11 +919,27 @@ std::wstring ResolveConfigPath(const std::wstring& value)
     if (trimmed.empty())
         return {};
 
+    if (_wcsicmp(trimmed.c_str(), kTemporaryConfigDisplay) == 0 &&
+        !g_temporaryConfigPath.empty())
+        return FullPath(g_temporaryConfigPath);
+
     const fs::path input(trimmed);
     if (input.is_absolute())
         return FullPath(trimmed);
 
     return FullPath((fs::path(GetModuleDirectory()) / input).wstring());
+}
+
+bool IsTemporaryConfigPath(const std::wstring& path)
+{
+    return !g_temporaryConfigPath.empty() &&
+           _wcsicmp(FullPath(path).c_str(), FullPath(g_temporaryConfigPath).c_str()) == 0;
+}
+
+bool IsTemporarySelection()
+{
+    return g_configEdit &&
+           _wcsicmp(Trim(GetControlText(g_configEdit)).c_str(), kTemporaryConfigDisplay) == 0;
 }
 
 bool IsPathInModuleDirectory(const std::wstring& path)
@@ -1007,6 +1087,19 @@ void LoadSettings()
         static_cast<DWORD>(std::size(config)), ini.c_str());
     g_settings.lastConfig = config;
 
+    wchar_t requestServer[512]{};
+    GetPrivateProfileStringW(L"QuickRequest", L"Server", L"", requestServer,
+        static_cast<DWORD>(std::size(requestServer)), ini.c_str());
+    g_settings.requestServer = requestServer;
+    g_settings.requestPort = GetPrivateProfileIntW(L"QuickRequest", L"Port", 51820, ini.c_str());
+    if (g_settings.requestPort < 1 || g_settings.requestPort > 65535)
+        g_settings.requestPort = 51820;
+    wchar_t requestName[256]{};
+    GetPrivateProfileStringW(L"QuickRequest", L"Name", L"New Device", requestName,
+        static_cast<DWORD>(std::size(requestName)), ini.c_str());
+    g_settings.requestName = Trim(requestName);
+    if (g_settings.requestName.empty()) g_settings.requestName = L"New Device";
+
     if (g_settings.autostart)
         g_settings.stayTray = true;
 }
@@ -1026,8 +1119,14 @@ bool SaveSettings()
         L"General", L"LastConfig", g_settings.lastConfig.c_str(), ini.c_str()) != FALSE;
     const bool ok5 = WritePrivateProfileStringW(
         L"General", L"AutoConnect", g_settings.autoConnect ? L"1" : L"0", ini.c_str()) != FALSE;
+    const bool ok6 = WritePrivateProfileStringW(
+        L"QuickRequest", L"Server", g_settings.requestServer.c_str(), ini.c_str()) != FALSE;
+    const bool ok7 = WritePrivateProfileStringW(
+        L"QuickRequest", L"Port", std::to_wstring(g_settings.requestPort).c_str(), ini.c_str()) != FALSE;
+    const bool ok8 = WritePrivateProfileStringW(
+        L"QuickRequest", L"Name", g_settings.requestName.c_str(), ini.c_str()) != FALSE;
 
-    return ok1 && ok2 && ok3 && ok4 && ok5;
+    return ok1 && ok2 && ok3 && ok4 && ok5 && ok6 && ok7 && ok8;
 }
 
 bool SetAutostartRegistry(bool enabled, std::wstring& error)
@@ -2552,6 +2651,13 @@ void ApplySelectedConfig(const std::wstring& path, bool logSelection)
     const std::wstring full = ResolveConfigPath(path);
     const std::wstring display = ConfigPathForDisplay(full);
 
+    if (!g_temporaryConfigPath.empty() &&
+        _wcsicmp(FullPath(g_temporaryConfigPath).c_str(), full.c_str()) != 0)
+    {
+        DeleteFileW(g_temporaryConfigPath.c_str());
+        g_temporaryConfigPath.clear();
+    }
+
     SetWindowTextW(g_configEdit, display.c_str());
     g_settings.lastConfig = ConfigPathForStorage(full);
     SaveSettings();
@@ -2746,7 +2852,9 @@ void DoConnect()
         return;
     }
 
-    SetWindowTextW(g_configEdit, ConfigPathForDisplay(configPath).c_str());
+    SetWindowTextW(g_configEdit,
+                   IsTemporaryConfigPath(configPath) ? kTemporaryConfigDisplay
+                                                     : ConfigPathForDisplay(configPath).c_str());
     SetStatus(SERVICE_START_PENDING);
     EnableWindow(g_connectButton, FALSE);
 
@@ -2804,8 +2912,11 @@ void DoConnect()
     GetLocalTime(&g_connectedLocalTime);
     g_connectedAt = std::chrono::steady_clock::now();
     g_hasConnectedTime = true;
-    g_settings.lastConfig = ConfigPathForStorage(configPath);
-    SaveSettings();
+    if (!IsTemporaryConfigPath(configPath))
+    {
+        g_settings.lastConfig = ConfigPathForStorage(configPath);
+        SaveSettings();
+    }
 
     AppendLog(Tr(L"已啟動臨時 Tunnel 服務：", L"Temporary tunnel service started: ") + serviceName);
     RefreshStatus();
@@ -2859,7 +2970,500 @@ void DoDisconnect(bool silent)
     RefreshStatus();
 }
 
-HFONT CreateUiFont(int pointSize = 9, bool bold = false)
+
+bool GeneratePortableKeyPair(std::array<BYTE, 32>& publicKey,
+                             std::array<BYTE, 32>& privateKey)
+{
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_KEY_HANDLE key = nullptr;
+    NTSTATUS status = static_cast<NTSTATUS>(-1);
+    if (!IsWindows7OrEarlier())
+        status = BCryptOpenAlgorithmProvider(&algorithm, L"ECDH", nullptr, 0);
+    if (status >= 0)
+    {
+        const wchar_t curve[] = L"curve25519";
+        status = BCryptSetProperty(
+            algorithm, L"ECCCurveName",
+            reinterpret_cast<PUCHAR>(const_cast<wchar_t*>(curve)),
+            static_cast<ULONG>(sizeof(curve)), 0);
+    }
+    if (status >= 0)
+        status = BCryptGenerateKeyPair(algorithm, &key, 255, 0);
+    if (status >= 0)
+        status = BCryptFinalizeKeyPair(key, 0);
+
+    struct ExportBlob
+    {
+        BCRYPT_ECCKEY_BLOB header;
+        BYTE publicPart[32];
+        BYTE unused[32];
+        BYTE privatePart[32];
+    } blob{};
+    ULONG written = 0;
+    if (status >= 0)
+        status = BCryptExportKey(key, nullptr, BCRYPT_ECCPRIVATE_BLOB,
+                                 reinterpret_cast<PUCHAR>(&blob), sizeof(blob),
+                                 &written, 0);
+    const bool cngOk = status >= 0 && written >= sizeof(blob);
+    if (cngOk)
+    {
+        std::copy(std::begin(blob.publicPart), std::end(blob.publicPart), publicKey.begin());
+        std::copy(std::begin(blob.privatePart), std::end(blob.privatePart), privateKey.begin());
+    }
+    SecureZeroMemory(&blob, sizeof(blob));
+    if (key) BCryptDestroyKey(key);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (cngOk) return true;
+
+    if (BCryptGenRandom(nullptr, privateKey.data(), static_cast<ULONG>(privateKey.size()),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
+        return false;
+    return easywg_x25519::public_from_private(publicKey.data(), privateKey.data());
+}
+
+std::wstring SafeRequestFileName(const std::wstring& suggested)
+{
+    std::wstring name = fs::path(suggested).filename().wstring();
+    if (name.empty()) name = L"EasyWG_Auto.conf";
+    if (ToLower(fs::path(name).extension().wstring()) != L".conf")
+        name += L".conf";
+    for (wchar_t& ch : name)
+    {
+        if (ch < 32 || wcschr(L"<>:\\|?*\"/", ch)) ch = L'_';
+    }
+    if (name.size() > 80)
+        name = name.substr(0, 75) + L".conf";
+    return name;
+}
+
+bool WriteUtf8ConfigFile(const std::wstring& path, const std::wstring& text,
+                         std::wstring& error)
+{
+    std::string utf8 = easywg_request::WideToUtf8(text);
+    std::ofstream output(fs::path(path), std::ios::binary | std::ios::trunc);
+    if (!output)
+    {
+        error = Tr(L"無法建立 WireGuard 設定檔：", L"Unable to create WireGuard configuration: ") + path;
+        if (!utf8.empty()) SecureZeroMemory(utf8.data(), utf8.size());
+        return false;
+    }
+    output.write(utf8.data(), static_cast<std::streamsize>(utf8.size()));
+    output.close();
+    const bool ok = !output.fail();
+    if (!utf8.empty()) SecureZeroMemory(utf8.data(), utf8.size());
+    if (!ok)
+    {
+        error = Tr(L"寫入 WireGuard 設定檔失敗：", L"Failed to write WireGuard configuration: ") + path;
+        return false;
+    }
+    return true;
+}
+
+std::wstring MakeUniquePermanentConfigPath(const std::wstring& suggested)
+{
+    const fs::path directory(GetModuleDirectory());
+    const fs::path safe(SafeRequestFileName(suggested));
+    fs::path candidate = directory / safe;
+    if (!FileExists(candidate.wstring())) return candidate.wstring();
+
+    const std::wstring stem = safe.stem().wstring();
+    for (int i = 2; i < 1000; ++i)
+    {
+        candidate = directory / (stem + L"_" + std::to_wstring(i) + L".conf");
+        if (!FileExists(candidate.wstring())) return candidate.wstring();
+    }
+    return (directory / (stem + L"_" + std::to_wstring(GetTickCount64()) + L".conf")).wstring();
+}
+
+std::wstring TemporaryConfigPath()
+{
+    wchar_t temp[MAX_PATH]{};
+    if (!GetTempPathW(static_cast<DWORD>(std::size(temp)), temp))
+        return (fs::path(GetModuleDirectory()) / L"EasyWG_Temporary.conf").wstring();
+    fs::path directory = fs::path(temp) / L"EasyWG_Portable";
+    std::error_code ec;
+    fs::create_directories(directory, ec);
+    return (directory / (L"EasyWG_Temporary_" + std::to_wstring(GetCurrentProcessId()) + L".conf")).wstring();
+}
+
+void CleanupStaleTemporaryConfigs()
+{
+    // This is called only after this process owns the single-instance mutex,
+    // so it cannot delete a temporary profile still used by another UI instance.
+    DeleteFileW((fs::path(GetModuleDirectory()) / L"EasyWG_Temporary.conf").wstring().c_str());
+
+    wchar_t temp[MAX_PATH]{};
+    if (!GetTempPathW(static_cast<DWORD>(std::size(temp)), temp)) return;
+    const fs::path directory = fs::path(temp) / L"EasyWG_Portable";
+    std::error_code ec;
+    if (!fs::is_directory(directory, ec)) return;
+    for (fs::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec))
+    {
+        if (!it->is_regular_file(ec)) continue;
+        const std::wstring name = it->path().filename().wstring();
+        if (name.rfind(L"EasyWG_Temporary_", 0) == 0 &&
+            _wcsicmp(it->path().extension().c_str(), L".conf") == 0)
+            fs::remove(it->path(), ec);
+        ec.clear();
+    }
+}
+
+std::wstring BuildRequestedConfigText(const easywg_request::Result& result,
+                                      const std::wstring& requestHost, int requestPort,
+                                      const std::array<BYTE, 32>& privateKey,
+                                      const std::array<BYTE, 32>& presharedKey)
+{
+    std::wstring endpoint = Trim(result.endpoint);
+    if (endpoint.empty()) endpoint = requestHost;
+    std::wstringstream config;
+    config << L"[Interface]\r\n"
+           << L"PrivateKey = "
+           << easywg_request::Utf8ToWide(easywg_request::Base64Encode(privateKey.data(), 32))
+           << L"\r\nAddress = " << result.address << L"\r\n";
+    if (!Trim(result.dns).empty()) config << L"DNS = " << result.dns << L"\r\n";
+    config << L"\r\n[Peer]\r\n"
+           << L"PublicKey = " << result.serverPublicKey << L"\r\n"
+           << L"PresharedKey = "
+           << easywg_request::Utf8ToWide(easywg_request::Base64Encode(presharedKey.data(), 32))
+           << L"\r\nEndpoint = " << endpoint << L":" << requestPort << L"\r\n"
+           << L"AllowedIPs = " << result.allowedIps << L"\r\n"
+           << L"PersistentKeepalive = 25\r\n";
+    return config.str();
+}
+
+void CompleteQuickRequest()
+{
+    QuickRequestCompletion completion;
+    {
+        std::lock_guard<std::mutex> lock(g_requestMutex);
+        completion = std::move(g_requestCompletion);
+        g_requestCompletion = {};
+    }
+    g_requestRunning = false;
+
+    if (!completion.ok)
+    {
+        if (g_reqSubmit) EnableWindow(g_reqSubmit, TRUE);
+        if (g_reqStatus) SetWindowTextW(g_reqStatus, completion.error.c_str());
+        if (!completion.error.empty())
+            MessageBoxW(g_requestWindow ? g_requestWindow : g_mainWindow,
+                        completion.error.c_str(), kAppName, MB_ICONERROR);
+        SecureClearWideString(completion.configText);
+        return;
+    }
+
+    std::wstring path = completion.temporary
+        ? TemporaryConfigPath()
+        : MakeUniquePermanentConfigPath(completion.suggestedFileName);
+    std::wstring error;
+    if (!WriteUtf8ConfigFile(path, completion.configText, error))
+    {
+        if (g_reqSubmit) EnableWindow(g_reqSubmit, TRUE);
+        if (g_reqStatus) SetWindowTextW(g_reqStatus, error.c_str());
+        MessageBoxW(g_requestWindow ? g_requestWindow : g_mainWindow,
+                    error.c_str(), kAppName, MB_ICONERROR);
+        SecureClearWideString(completion.configText);
+        return;
+    }
+
+    if (completion.temporary)
+    {
+        if (!g_temporaryConfigPath.empty() &&
+            _wcsicmp(g_temporaryConfigPath.c_str(), path.c_str()) != 0)
+            DeleteFileW(g_temporaryConfigPath.c_str());
+        g_temporaryConfigPath = path;
+        SetWindowTextW(g_configEdit, kTemporaryConfigDisplay);
+        UpdateConnectionInfo();
+        AppendLog(Tr(L"臨時連線申請完成，設定只保留到程式退出。",
+                     L"Temporary connection request completed; the configuration is kept only until the app exits."));
+    }
+    else
+    {
+        ApplySelectedConfig(path, false);
+        AppendLog(Tr(L"快速申請完成，設定檔已儲存：",
+                     L"Quick request completed; configuration saved: ") + path);
+    }
+
+    if (g_requestWindow && IsWindow(g_requestWindow))
+        DestroyWindow(g_requestWindow);
+    ShowMainWindow();
+    SecureClearWideString(completion.configText);
+    DoConnect();
+}
+
+void StartQuickRequest()
+{
+    if (g_requestRunning) return;
+    const bool temporary = SendMessageW(g_reqTemporary, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool fullTunnel = SendMessageW(g_reqFullTunnel, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    std::wstring connectionName = temporary ? L"New Device" : Trim(GetControlText(g_reqName));
+    const std::wstring server = Trim(GetControlText(g_reqServer));
+    const int port = _wtoi(Trim(GetControlText(g_reqPort)).c_str());
+    std::wstring password = GetControlText(g_reqPassword);
+    if (connectionName.empty() || server.empty() || port < 1 || port > 65535 || password.empty())
+    {
+        MessageBoxW(g_requestWindow,
+                    Tr(L"請輸入連線名稱、申請伺服器、1～65535 的連接埠與申請密碼。",
+                       L"Enter a connection name, request server, port from 1 to 65535, and request password."),
+                    kAppName, MB_ICONWARNING);
+        return;
+    }
+
+    g_settings.requestServer = server;
+    g_settings.requestPort = port;
+    if (!temporary) g_settings.requestName = connectionName;
+    SaveSettings();
+    EnableWindow(g_reqSubmit, FALSE);
+    SetWindowTextW(g_reqStatus,
+                   Tr(L"正在驗證密碼並申請 WireGuard 設定…",
+                      L"Verifying the password and requesting WireGuard configuration..."));
+    g_requestRunning = true;
+
+    std::thread([server, port, password, temporary, fullTunnel, connectionName]() mutable {
+        QuickRequestCompletion completion;
+        completion.temporary = temporary;
+        completion.requestHost = server;
+
+        easywg_request::Request request;
+        request.temporary = temporary;
+        request.fullTunnel = fullTunnel;
+        request.clientName = temporary ? L"New Device" : connectionName;
+
+        std::array<BYTE, 32> privateKey{};
+        if (!GeneratePortableKeyPair(request.publicKey, privateKey) ||
+            !easywg_request::GenerateRandom(request.presharedKey.data(),
+                                             static_cast<ULONG>(request.presharedKey.size())))
+        {
+            completion.error = Tr(L"無法產生 WireGuard 用戶金鑰。",
+                                  L"Unable to generate WireGuard client keys.");
+        }
+        else
+        {
+            easywg_request::Result result;
+            std::wstring error;
+            if (easywg_request::PerformRequest(server, static_cast<unsigned short>(port),
+                                               password, request, result, error))
+            {
+                if (Trim(result.address).empty() || Trim(result.allowedIps).empty() ||
+                    Trim(result.serverPublicKey).empty())
+                {
+                    completion.error = Tr(L"Server 回傳的 WireGuard 設定不完整。",
+                                          L"The server returned an incomplete WireGuard configuration.");
+                }
+                else
+                {
+                    completion.ok = true;
+                    completion.suggestedFileName = result.fileName;
+                    completion.configText = BuildRequestedConfigText(
+                        result, server, port, privateKey, request.presharedKey);
+                }
+            }
+            else
+            {
+                completion.error = error;
+            }
+        }
+        SecureZeroMemory(privateKey.data(), privateKey.size());
+        SecureZeroMemory(password.data(), password.size() * sizeof(wchar_t));
+        {
+            std::lock_guard<std::mutex> lock(g_requestMutex);
+            g_requestCompletion = std::move(completion);
+        }
+        if (g_requestWindow && IsWindow(g_requestWindow))
+            PostMessageW(g_requestWindow, WM_REQUEST_DONE, 0, 0);
+    }).detach();
+}
+
+LRESULT CALLBACK RequestWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    static HFONT normalFont = nullptr;
+    static HFONT titleFont = nullptr;
+    static HFONT linkFont = nullptr;
+    switch (message)
+    {
+    case WM_CREATE:
+    {
+        g_requestWindow = hwnd;
+        normalFont = CreateUiFont(10, false);
+        titleFont = CreateUiFont(14, true);
+        LOGFONTW requestLinkLf{};
+        GetObjectW(normalFont, sizeof(requestLinkLf), &requestLinkLf);
+        requestLinkLf.lfWeight = FW_SEMIBOLD;
+        requestLinkLf.lfUnderline = TRUE;
+        linkFont = CreateFontIndirectW(&requestLinkLf);
+
+        HWND title = CreateWindowExW(0, L"STATIC",
+            Tr(L"EasyWG Server 快速申請連線", L"EasyWG Server Quick Connection Request"),
+            WS_CHILD | WS_VISIBLE, 24, 18, 470, 34, hwnd, nullptr, g_instance, nullptr);
+        ApplyFont(title, titleFont);
+
+        auto label = [&](const wchar_t* caption, int y) {
+            HWND control = CreateWindowExW(0, L"STATIC", caption, WS_CHILD | WS_VISIBLE,
+                                            28, y, 122, 28, hwnd, nullptr, g_instance, nullptr);
+            ApplyFont(control, normalFont);
+        };
+        label(Tr(L"連線名稱：", L"Connection name:"), 68);
+        label(Tr(L"申請伺服器：", L"Request server:"), 112);
+        label(Tr(L"連接埠：", L"Port:"), 156);
+        label(Tr(L"申請密碼：", L"Request password:"), 200);
+
+        g_reqName = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_settings.requestName.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            150, 64, 330, 31, hwnd, reinterpret_cast<HMENU>(IDC_REQ_NAME), g_instance, nullptr);
+        g_reqServer = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", g_settings.requestServer.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            150, 108, 330, 31, hwnd, reinterpret_cast<HMENU>(IDC_REQ_SERVER), g_instance, nullptr);
+        g_reqPort = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", std::to_wstring(g_settings.requestPort).c_str(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER,
+            150, 152, 130, 31, hwnd, reinterpret_cast<HMENU>(IDC_REQ_PORT), g_instance, nullptr);
+        g_reqPassword = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL,
+            150, 196, 330, 31, hwnd, reinterpret_cast<HMENU>(IDC_REQ_PASSWORD), g_instance, nullptr);
+        g_reqFullTunnel = CreateWindowExW(0, L"BUTTON",
+            Tr(L"需使用 VPN 主機公網 IP 上網\r\n（不勾選仍可連接內網）",
+               L"Route Internet traffic through the VPN server\r\n(Unchecked still allows private-network access)"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_MULTILINE,
+            32, 240, 452, 52, hwnd, reinterpret_cast<HMENU>(IDC_REQ_FULL_TUNNEL), g_instance, nullptr);
+        g_reqTemporary = CreateWindowExW(0, L"BUTTON",
+            Tr(L"臨時連線申請\r\n（關閉程式後需重新申請）",
+               L"Temporary connection request\r\n(Request again after exiting the app)"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX | BS_MULTILINE,
+            32, 296, 452, 52, hwnd, reinterpret_cast<HMENU>(IDC_REQ_TEMPORARY), g_instance, nullptr);
+        SendMessageW(g_reqFullTunnel, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(g_reqTemporary, BM_SETCHECK, BST_UNCHECKED, 0);
+
+        g_reqDownload = CreateWindowExW(0, L"STATIC",
+            Tr(L"EasyWG Server 伺服器端（GitHub 下載）", L"EasyWG Server (GitHub download)"),
+            WS_CHILD | WS_VISIBLE | SS_NOTIFY,
+            32, 360, 430, 28, hwnd, reinterpret_cast<HMENU>(IDC_REQ_DOWNLOAD), g_instance, nullptr);
+        g_reqStatus = CreateWindowExW(0, L"STATIC", L"",
+            WS_CHILD | WS_VISIBLE | SS_CENTER | SS_NOPREFIX,
+            24, 398, 472, 82, hwnd, reinterpret_cast<HMENU>(IDC_REQ_STATUS), g_instance, nullptr);
+        g_reqSubmit = CreateWindowExW(0, L"BUTTON",
+            Tr(L"申請並連線", L"Request and Connect"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            190, 492, 140, 38, hwnd, reinterpret_cast<HMENU>(IDC_REQ_SUBMIT), g_instance, nullptr);
+        g_reqCancel = CreateWindowExW(0, L"BUTTON", Tr(L"取消", L"Cancel"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            340, 492, 100, 38, hwnd, reinterpret_cast<HMENU>(IDC_REQ_CANCEL), g_instance, nullptr);
+
+        for (HWND control : {g_reqName, g_reqServer, g_reqPort, g_reqPassword, g_reqFullTunnel,
+                             g_reqTemporary, g_reqStatus, g_reqSubmit, g_reqCancel})
+            ApplyFont(control, normalFont);
+        ApplyFont(g_reqDownload, linkFont);
+        SetFocus(g_reqName);
+        return 0;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case IDC_REQ_SUBMIT:
+            StartQuickRequest();
+            return 0;
+        case IDC_REQ_CANCEL:
+            if (!g_requestRunning) DestroyWindow(hwnd);
+            return 0;
+        case IDC_REQ_TEMPORARY:
+            if (HIWORD(wParam) == BN_CLICKED && g_reqName)
+            {
+                const bool temporary = SendMessageW(g_reqTemporary, BM_GETCHECK, 0, 0) == BST_CHECKED;
+                if (temporary)
+                {
+                    const std::wstring current = Trim(GetControlText(g_reqName));
+                    if (!current.empty()) g_settings.requestName = current;
+                    SetWindowTextW(g_reqName, L"New Device");
+                    EnableWindow(g_reqName, FALSE);
+                }
+                else
+                {
+                    EnableWindow(g_reqName, TRUE);
+                    SetWindowTextW(g_reqName,
+                        g_settings.requestName.empty() ? L"New Device" : g_settings.requestName.c_str());
+                    SetFocus(g_reqName);
+                }
+            }
+            return 0;
+        case IDC_REQ_DOWNLOAD:
+            if (HIWORD(wParam) == STN_CLICKED)
+                ShellExecuteW(hwnd, L"open",
+                    L"https://github.com/Terence0816/easy-wireguard-server",
+                    nullptr, nullptr, SW_SHOWNORMAL);
+            return 0;
+        }
+        break;
+    case WM_REQUEST_DONE:
+        CompleteQuickRequest();
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    {
+        HDC dc = reinterpret_cast<HDC>(wParam);
+        HWND control = reinterpret_cast<HWND>(lParam);
+        SetBkMode(dc, TRANSPARENT);
+        if (control == g_reqDownload)
+            SetTextColor(dc, RGB(20, 92, 190));
+        else if (control == g_reqStatus)
+            SetTextColor(dc, g_mutedTextColor);
+        else
+            SetTextColor(dc, g_textColor);
+        return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+    }
+    case WM_SETCURSOR:
+        if (reinterpret_cast<HWND>(wParam) == g_reqDownload)
+        {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
+        break;
+    case WM_CLOSE:
+        if (!g_requestRunning) DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        if (normalFont) { DeleteObject(normalFont); normalFont = nullptr; }
+        if (titleFont) { DeleteObject(titleFont); titleFont = nullptr; }
+        if (linkFont) { DeleteObject(linkFont); linkFont = nullptr; }
+        g_requestWindow = nullptr;
+        if (g_mainWindow && IsWindow(g_mainWindow))
+        {
+            EnableWindow(g_mainWindow, TRUE);
+            SetForegroundWindow(g_mainWindow);
+        }
+        g_reqName = g_reqServer = g_reqPort = g_reqPassword = nullptr;
+        g_reqFullTunnel = g_reqTemporary = nullptr;
+        g_reqSubmit = g_reqCancel = g_reqStatus = g_reqDownload = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+void ShowQuickRequest()
+{
+    if (!g_activeServiceName.empty())
+    {
+        MessageBoxW(g_mainWindow,
+                    Tr(L"請先中斷目前的 Tunnel，再申請新的連線。",
+                       L"Disconnect the current tunnel before requesting a new connection."),
+                    kAppName, MB_ICONINFORMATION);
+        return;
+    }
+    if (g_requestWindow)
+    {
+        SetForegroundWindow(g_requestWindow);
+        return;
+    }
+    RECT mainRect{};
+    GetWindowRect(g_mainWindow, &mainRect);
+    const int width = 540, height = 610;
+    const int x = mainRect.left + ((mainRect.right - mainRect.left) - width) / 2;
+    const int y = mainRect.top + ((mainRect.bottom - mainRect.top) - height) / 2;
+    g_requestWindow = CreateWindowExW(
+        WS_EX_DLGMODALFRAME, kRequestClass,
+        Tr(L"快速申請連線", L"Quick Connection Request"),
+        WS_CAPTION | WS_SYSMENU | WS_POPUP | WS_VISIBLE,
+        x, y, width, height, g_mainWindow, nullptr, g_instance, nullptr);
+    if (g_requestWindow) EnableWindow(g_mainWindow, FALSE);
+}
+
+HFONT CreateUiFont(int pointSize, bool bold)
 {
     HDC screen = GetDC(nullptr);
     const int dpi = screen ? GetDeviceCaps(screen, LOGPIXELSY) : 96;
@@ -2949,6 +3553,7 @@ void UpdateMenuText()
         return;
 
     ModifyMenuW(g_mainMenu, IDM_OPTIONS, MF_BYCOMMAND | MF_STRING, IDM_OPTIONS, Tr(L"選項", L"Options"));
+    ModifyMenuW(g_mainMenu, IDM_QUICK_REQUEST, MF_BYCOMMAND | MF_STRING, IDM_QUICK_REQUEST, Tr(L"快速申請連線", L"Quick Request"));
     ModifyMenuW(g_mainMenu, IDM_ABOUT, MF_BYCOMMAND | MF_STRING, IDM_ABOUT, Tr(L"關於", L"About"));
     DrawMenuBar(g_mainWindow);
 }
@@ -3429,6 +4034,7 @@ void CreateMainMenu()
 {
     g_mainMenu = CreateMenu();
     AppendMenuW(g_mainMenu, MF_STRING, IDM_OPTIONS, Tr(L"選項", L"Options"));
+    AppendMenuW(g_mainMenu, MF_STRING, IDM_QUICK_REQUEST, Tr(L"快速申請連線", L"Quick Request"));
     AppendMenuW(g_mainMenu, MF_STRING, IDM_ABOUT, Tr(L"關於", L"About"));
 }
 
@@ -3442,7 +4048,8 @@ void UpdateOptionsDependencies()
         SendMessageW(g_optStayTray, BM_SETCHECK, BST_CHECKED, 0);
     EnableWindow(g_optStayTray, autostart ? FALSE : TRUE);
 
-    const bool hasConfig = IsUsableConfPath(GetControlText(g_configEdit));
+    const bool hasConfig = !IsTemporarySelection() &&
+                           IsUsableConfPath(GetControlText(g_configEdit));
     if (!hasConfig)
         SendMessageW(g_optAutoConnect, BM_SETCHECK, BST_UNCHECKED, 0);
     EnableWindow(g_optAutoConnect, hasConfig ? TRUE : FALSE);
@@ -3462,7 +4069,10 @@ void SaveOptions()
 
     const int languageIndex = static_cast<int>(SendMessageW(g_optLanguage, CB_GETCURSEL, 0, 0));
     updated.language = languageIndex == 1 ? Language::English : Language::ZhTW;
-    updated.lastConfig = ConfigPathForStorage(ResolveConfigPath(GetControlText(g_configEdit)));
+    if (!IsTemporarySelection())
+        updated.lastConfig = ConfigPathForStorage(ResolveConfigPath(GetControlText(g_configEdit)));
+    else
+        updated.autoConnect = false;
 
     std::wstring error;
     if (!SetAutostartRegistry(updated.autostart, error))
@@ -3740,6 +4350,11 @@ void ExitApplication()
     g_forceExit = true;
     g_closing = true;
     DoDisconnect(true);
+    if (!g_temporaryConfigPath.empty())
+    {
+        DeleteFileW(g_temporaryConfigPath.c_str());
+        g_temporaryConfigPath.clear();
+    }
     DestroyWindow(g_mainWindow);
 }
 
@@ -3901,6 +4516,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             ShowOptions();
             return 0;
 
+        case IDM_QUICK_REQUEST:
+            ShowQuickRequest();
+            return 0;
+
         case IDM_ABOUT:
             ShowAbout();
             return 0;
@@ -3986,18 +4605,27 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             return reinterpret_cast<LRESULT>(editBrush);
         }
 
-        SetBkMode(dc, TRANSPARENT);
-
         if (control == g_statusLabel)
         {
+            // The status label used a transparent NULL_BRUSH background. When
+            // the text changed (for example Starting -> Connected), some DPI /
+            // theme combinations left the previous glyphs behind and made the
+            // green status look overlapped. Paint the whole label background
+            // opaquely with the card colour before drawing the new state.
+            SetBkMode(dc, OPAQUE);
+            SetBkColor(dc, g_cardColor);
             if (g_lastServiceState == SERVICE_RUNNING)
                 SetTextColor(dc, g_statusOnlineColor);
             else if (g_lastServiceState == SERVICE_START_PENDING || g_lastServiceState == SERVICE_STOP_PENDING)
                 SetTextColor(dc, g_statusPendingColor);
             else
                 SetTextColor(dc, g_statusOfflineColor);
+            return reinterpret_cast<LRESULT>(editBrush);
         }
-        else if (control == g_configLabel || control == g_infoLabel || control == g_logLabel)
+
+        SetBkMode(dc, TRANSPARENT);
+
+        if (control == g_configLabel || control == g_infoLabel || control == g_logLabel)
         {
             SetTextColor(dc, g_mutedTextColor);
         }
@@ -4072,6 +4700,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             editBrush = nullptr;
         }
 
+        if (!g_temporaryConfigPath.empty())
+        {
+            DeleteFileW(g_temporaryConfigPath.c_str());
+            g_temporaryConfigPath.clear();
+        }
         PostQuitMessage(0);
         return 0;
 
@@ -4350,6 +4983,19 @@ bool RegisterWindowClasses()
     if (!RegisterClassExW(&about))
         return false;
 
+    WNDCLASSEXW request{};
+    request.cbSize = sizeof(request);
+    request.lpfnWndProc = RequestWindowProc;
+    request.hInstance = g_instance;
+    request.lpszClassName = kRequestClass;
+    request.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    request.hIcon = g_appIcon ? g_appIcon : LoadIconW(nullptr, IDI_APPLICATION);
+    request.hIconSm = g_appIcon ? g_appIcon : LoadIconW(nullptr, IDI_APPLICATION);
+    request.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+
+    if (!RegisterClassExW(&request))
+        return false;
+
     return true;
 }
 
@@ -4459,6 +5105,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
         return 0;
     }
 
+    CleanupStaleTemporaryConfigs();
+
     if (!RegisterWindowClasses())
         return 2;
 
@@ -4502,7 +5150,8 @@ int APIENTRY wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int showCommand)
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
     {
-        if (!g_optionsWindow || !IsDialogMessageW(g_optionsWindow, &msg))
+        if ((!g_optionsWindow || !IsDialogMessageW(g_optionsWindow, &msg)) &&
+            (!g_requestWindow || !IsDialogMessageW(g_requestWindow, &msg)))
         {
             if (!IsDialogMessageW(window, &msg))
             {
