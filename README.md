@@ -18,6 +18,31 @@ It is designed for users who want a simple portable workflow without installing 
 
 ### v0.2.8.10
 
+你這次新增功能的標題應該改成 v0.2.9.2。以下已整理成和舊版相同的「主項目＋縮排子項目」格式，可直接貼進 README.md。
+
+## English
+
+### v0.2.9.2
+
+- Added self-service connection requests
+  - Added support for requesting WireGuard connection profiles directly from [EasyWG Server](https://github.com/Terence0816/easy-wireguard-server).
+  - Users can submit a connection request by entering the request password configured by the server administrator.
+  - Supports both permanent and temporary connection profiles.
+  - After a successful request, EasyWG Portable automatically receives the WireGuard configuration and establishes the connection.
+
+- Added customizable connection options
+  - Permanent connections can use a custom connection name.
+  - Users can choose to route all Internet traffic through the server's public IP address.
+  - Users can also choose LAN-only access without routing general Internet traffic through the VPN server.
+
+- Added temporary connection support
+  - Temporary connection profiles are retained only while EasyWG Portable remains open.
+  - Manually disconnecting or temporarily losing the connection does not immediately invalidate the profile, allowing the user to reconnect while the program remains open.
+  - After EasyWG Portable is closed, the temporary profile is no longer retained locally.
+  - When temporary access is needed again, the user can submit a new request using the server request password.
+
+### v0.2.8.10
+
 - Improved the `wireguard.dll` download flow
   - On Windows 10 / 11, EasyWG still tries to download `wireguard.dll` from the official WireGuard source first.
   - If the official download fails, EasyWG now automatically falls back to the EasyWG GitHub `core-v1` backup source.
@@ -246,17 +271,24 @@ EasyWG Portable 是一款輕量化、免傳統安裝的 **Windows WireGuard VPN 
 
 ## 版本更新紀錄
 
-### v0.2.8.8
+### v0.2.9.2
 
-- 改善 `wireguard.dll` 下載流程
-  - Windows 10 / 11 缺少 `wireguard.dll` 時，仍會優先嘗試從 WireGuard 官方來源取得。
-  - 若官方來源下載失敗，會自動改用 EasyWG GitHub `core-v1` 備援來源下載。
-  - 可降低部分環境因網路、防火牆、TLS 或官方下載站連線問題導致首次啟動失敗的情況。
+- 新增自助申請連線功能
+  - 新增與 [EasyWG Server](https://github.com/Terence0816/easy-wireguard-server) 配合的 WireGuard 自助申請功能。
+  - 使用者輸入伺服器管理員設定的申請密碼後，即可自行提出連線申請。
+  - 支援申請長期連線設定或臨時連線設定。
+  - 申請成功後，EasyWG Portable 會自動取得 WireGuard 設定並建立連線。
 
-- 修復主視窗閒置時可能持續閃動的問題
-  - 減少不必要的每秒 UI 重繪。
-  - 狀態文字、連線資訊與紀錄內容未變更時，不再重複刷新。
-  - 改善主視窗在未操作時的穩定顯示效果。
+- 新增自訂連線選項
+  - 申請長期連線時，可以自訂連線名稱。
+  - 可以選擇將所有網路流量透過伺服器的公網 IP 上網。
+  - 也可以選擇僅連接伺服器端區域網路，不將一般網際網路流量導向 VPN 伺服器。
+
+- 新增臨時連線功能
+  - 臨時連線設定僅在 EasyWG Portable 保持開啟期間保留。
+  - 手動中斷或暫時發生連線異常時，設定不會立即失效，程式保持開啟期間仍可再次手動連線。
+  - 關閉 EasyWG Portable 後，臨時連線設定將不再保留於本機。
+  - 之後如需再次使用臨時連線，可透過伺服器提供的申請密碼重新提出申請。
 
 ### v0.2.8.8
 
