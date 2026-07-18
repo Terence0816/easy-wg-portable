@@ -2,7 +2,7 @@
 
 Lightweight and portable WireGuard quick-connect client for Windows 7 / 10 / 11.
 
-[![Downloads](https://img.shields.io/github/downloads/Terence0816/easy-wg-portable/total?label=Downloads&color=1f6feb)](https://github.com/Terence0816/easy-wg-portable/releases) | [Releases](https://github.com/Terence0816/easy-wg-portable/releases) | [Latest Official Build `v0.2.8.10`](https://github.com/Terence0816/easy-wg-portable/releases/download/v0.2.8.10/EasyWG.exe) | [MIT License](./LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/Terence0816/easy-wg-portable/total?label=Downloads&color=1f6feb)](https://github.com/Terence0816/easy-wg-portable/releases) | [Releases](https://github.com/Terence0816/easy-wg-portable/releases) | [MIT License](./LICENSE)
 
 English | [繁體中文](#zh-tw)
 
@@ -15,12 +15,6 @@ It is designed for users who want a simple portable workflow without installing 
 > EasyWG Portable is an independent, unofficial project and is not affiliated with or endorsed by the WireGuard project.
 
 ## Version History
-
-### v0.2.8.10
-
-你這次新增功能的標題應該改成 v0.2.9.2。以下已整理成和舊版相同的「主項目＋縮排子項目」格式，可直接貼進 README.md。
-
-## English
 
 ### v0.2.9.2
 
